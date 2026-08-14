@@ -1,0 +1,45 @@
+[Unit]
+Description=BloFin caching REST proxy (WS-fed) for Freqtrade
+Documentation=https://github.com/cyberjunky/blofin-proxy
+# Ordering only, not a hard dependency: the proxy retries upstream on its own,
+# so it is fine for it to start before the network is fully settled.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ron
+Group=ron
+WorkingDirectory=/opt/freqtrade/blofin-proxy
+ExecStart=/home/ron/.venv/bin/python -m blofin_proxy --port 8095 --host 127.0.0.1
+
+# Freqtrade talks to this proxy on every candle close; if it dies the bots lose
+# their market data, so always bring it back. StartLimit* keeps a genuine crash
+# loop (bad config, port taken) from restarting forever in silence.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Unbuffered so log lines reach the journal as they happen rather than in
+# 4KB blocks — this is the only place the upstream request count is visible.
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blofin-proxy
+
+# Hardening. The proxy reads no files and only makes outbound HTTPS calls
+# plus its own loopback listener, so it can be locked down tightly.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
