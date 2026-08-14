@@ -7,7 +7,7 @@ import time
 
 from aiohttp import web
 
-from .cache import CandleBook, TTLCache, bar_to_seconds
+from .cache import CandleBook, TTLCache, _num, bar_to_seconds
 from .feed import FeedManager
 from .upstream import UpstreamClient
 
@@ -18,7 +18,14 @@ MARKET_PREFIX = "/api/v1/market/"
 # Static TTLs per market endpoint (seconds). Candles and tickers are WS-fed and
 # handled by dedicated routes; mark-price/index candles derive TTL from `bar`.
 _TTL_TABLE = {
-    "books": 1.0,
+    # 1.0s was effectively no cache at all: freqtrade asks for each pair's book
+    # about once per cycle, so a 1s entry had almost always expired before the
+    # same pair came round again (measured 19321 misses against 8112 hits),
+    # leaving this route a rate-limited passthrough that queued into Cloudflare
+    # 429s. Top-of-book a few seconds old is fine for order_book_top=1 pricing.
+    # The real fix is to WS-feed books like candles/tickers — BloFin supports
+    # watchOrderBook — at which point this TTL stops mattering.
+    "books": 5.0,
     "trades": 2.0,
     "mark-price": 2.0,
     "instruments": 300.0,
@@ -48,6 +55,7 @@ def make_app(
     app.router.add_get("/health", health)
     app.router.add_get(MARKET_PREFIX + "candles", candles)
     app.router.add_get(MARKET_PREFIX + "tickers", tickers)
+    app.router.add_get(MARKET_PREFIX + "books", books)
     app.router.add_get(MARKET_PREFIX + "{endpoint}", market_cached)
     app.router.add_route("*", "/{tail:.*}", catch_all)
     return app
@@ -192,6 +200,39 @@ async def tickers(request: web.Request) -> web.Response:
         }
         return web.json_response({"code": "0", "msg": "success", "data": [row]})
     return await _cached_get(request, 5.0)
+
+
+async def books(request: web.Request) -> web.Response:
+    """WS-fed order book; falls back to the TTL-cached passthrough when cold.
+
+    This route exists because `use_order_book` pricing asks for one book per
+    pair per bot cycle. Served from REST that is thousands of upstream calls a
+    minute at a large pairlist — enough to earn a Cloudflare 1015 IP ban — and
+    the TTL cache cannot absorb it, since the same pair is rarely requested
+    twice inside one TTL window.
+    """
+    feed: FeedManager | None = request.app["feed"]
+    inst_id = request.query.get("instId")
+    try:
+        size = max(1, min(400, int(request.query.get("size", "1"))))
+    except ValueError:
+        size = 1
+
+    if not inst_id:
+        return await catch_all(request)
+
+    if feed is not None:
+        await feed.ensure_books(inst_id)
+        ob = feed.books.get(inst_id)
+        if ob and ob["bids"] and ob["asks"]:
+            row = {
+                "asks": [[_num(p), _num(s)] for p, s in ob["asks"][:size]],
+                "bids": [[_num(p), _num(s)] for p, s in ob["bids"][:size]],
+                "ts": str(ob["ts"] or int(time.time() * 1000)),
+            }
+            return web.json_response({"code": "0", "msg": "success", "data": [row]})
+    # Cold book (watcher just started, or no market for this instId).
+    return await _cached_get(request, _TTL_TABLE["books"])
 
 
 async def market_cached(request: web.Request) -> web.Response:
