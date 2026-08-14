@@ -42,6 +42,23 @@ curl "http://127.0.0.1:8095/api/v1/market/candles?instId=BTC-USDT&bar=5m&limit=5
 `/health` reports uptime, WS watcher status, cache hit/miss stats, and the
 total upstream request counter (proof that bot traffic collapsed).
 
+## Run as a service
+
+`blofin-proxy.service` is a systemd unit for the common case (venv at
+`/home/ron/.venv`, checkout at `/opt/freqtrade/blofin-proxy`). Edit `User`,
+`WorkingDirectory` and `ExecStart` to match your paths, then:
+
+```bash
+sudo cp blofin-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now blofin-proxy
+systemctl status blofin-proxy
+journalctl -u blofin-proxy -f
+```
+
+Start it *before* the bots — freqtrade fails its market-data calls if the
+proxy is not listening.
+
 ## Point freqtrade at the proxy
 
 In each bot's config:
@@ -80,7 +97,7 @@ gatekeeper for upstream REST traffic.
 
 ```bash
 # from the repo root
-.venv/Scripts/python.exe -m pytest blofin-proxy/tests -q
+python -m pytest -q
 ```
 
 Layout: `blofin_proxy/limiter.py` (token bucket), `cache.py` (TTLCache +
@@ -90,3 +107,7 @@ catch-all), `feed.py` (ccxt.pro WS watcher manager), `__main__.py` (CLI).
 ## Referral
 
 If you like this tool signup at BloFin with my referral: https://blofin.com/register?referral_code=HYXOVL
+
+## License
+
+MIT — see [LICENSE](LICENSE).
