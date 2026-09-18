@@ -19,6 +19,8 @@ working through the proxy unchanged.
 ## Install
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt   # aiohttp, ccxt>=4.5
 ```
 
@@ -26,7 +28,7 @@ pip install -r requirements.txt   # aiohttp, ccxt>=4.5
 
 ```bash
 cd blofin-proxy
-python -m blofin_proxy --port 8095 --host 127.0.0.1
+python3 -m blofin_proxy --port 8095 --host 127.0.0.1
 ```
 
 Options: `--upstream` (default `https://openapi.blofin.com`), `--rate`
@@ -84,7 +86,7 @@ gatekeeper for upstream REST traffic.
 
 | Endpoint (`/api/v1/market/...`) | Strategy |
 |---|---|
-| `candles` | WS-fed candle book; cold keys seed from REST (single-flight) and start a watcher |
+| `candles` | Latest requests use the WS-fed candle book; requests with `after` or `before` use cached upstream REST, preserving pagination and the requested limit without seeding the live book |
 | `mark-price-candles`, `index-candles` | TTL = max(5 s, bar/4) + single-flight |
 | `tickers` | WS-fed when available; TTL 5 s cached fallback |
 | `books` | TTL 1 s + single-flight |

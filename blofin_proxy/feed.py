@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 
 _TF_UNITS = {"m": "m", "H": "h", "D": "d", "W": "w", "M": "M"}
 
+# How often the reaper sweeps, and how long a watcher may go unrequested first.
+_REAP_INTERVAL = 300.0
+_BOOK_IDLE_TTL = 1800.0
+_CANDLE_IDLE_FLOOR = 1800.0
+_CANDLE_IDLE_CAP = 21600.0
+
 
 def bar_to_ccxt_timeframe(bar: str) -> str:
     """Map a BloFin bar (``5m``, ``1H``, ``1D``) to a ccxt timeframe (``5m``, ``1h``, ``1d``)."""
@@ -21,6 +27,22 @@ def bar_to_ccxt_timeframe(bar: str) -> str:
     if unit not in _TF_UNITS:
         raise ValueError(f"unknown bar unit: {bar!r}")
     return bar[:-1] + _TF_UNITS[unit]
+
+
+def candle_idle_ttl(bar: str) -> float:
+    """How long a candle watcher may go unrequested before it is reaped.
+
+    Two bar periods, so a pair that is still in the pairlist cannot be reaped
+    between refreshes — freqtrade re-requests a key at least once per bar
+    close, and reaping a live key would only churn it back with a REST reseed.
+    Floored so fast bars still get a usable grace window, capped so a 1D key
+    cannot pin a dropped pair for days.
+    """
+    try:
+        span = float(bar_to_seconds(bar))
+    except ValueError:
+        return _CANDLE_IDLE_FLOOR
+    return min(max(_CANDLE_IDLE_FLOOR, span * 2), _CANDLE_IDLE_CAP)
 
 
 class FeedManager:
@@ -52,6 +74,11 @@ class FeedManager:
         self._ticker_symbols: set[str] = set()
         self._contract_size: dict[str, float] = {}
         self._last_reseed: dict[tuple[str, str], float] = {}
+        # Last time each per-pair watcher's route was asked for, so idle ones
+        # can be reaped. See _reap.
+        self._last_seen: dict[tuple, float] = {}
+        self._reaper_task: asyncio.Task | None = None
+        self.reaped = 0
         self._started = False
         self._stopped = False
 
@@ -77,6 +104,7 @@ class FeedManager:
             if m.get("contractSize")
         }
         self._started = True
+        self._reaper_task = asyncio.create_task(self._reap())
         logger.info("feed started, %d markets loaded", len(self._id_to_symbol))
 
     def contract_size(self, inst_id: str) -> float | None:
@@ -91,6 +119,9 @@ class FeedManager:
         if not self._started or self._stopped:
             return
         key = ("candles", inst_id, bar)
+        # Touch before the liveness check: a running watcher still needs its
+        # idle clock reset, or the reaper would eventually take a live key.
+        self._last_seen[key] = time.monotonic()
         if key in self._tasks and not self._tasks[key].done():
             return
         symbol = self._id_to_symbol.get(inst_id)
@@ -192,6 +223,7 @@ class FeedManager:
         if not self._started or self._stopped:
             return
         key = ("books", inst_id)
+        self._last_seen[key] = time.monotonic()
         if key in self._tasks and not self._tasks[key].done():
             return
         symbol = self._id_to_symbol.get(inst_id)
@@ -243,6 +275,44 @@ class FeedManager:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
 
+    async def _reap(self) -> None:
+        """Cancel per-pair watchers whose route has stopped being requested.
+
+        ensure_candles/ensure_books are idempotent on creation, but nothing
+        removed a watcher when its pair left the pairlist — so under a
+        rotating VolumePairList the task set grew monotonically for the life
+        of the process (measured 280 distinct pairs against a 250-asset list
+        after 9h, along with every candle those dead keys kept resident).
+
+        Idle time is the signal, since the proxy has no view of the pairlist.
+        The single tickers watcher is skipped: it is not per-pair, and it ends
+        itself when its symbol set is empty.
+        """
+        while not self._stopped:
+            await asyncio.sleep(_REAP_INTERVAL)
+            now = time.monotonic()
+            for key, task in list(self._tasks.items()):
+                if key[0] == "candles":
+                    ttl = candle_idle_ttl(key[2])
+                elif key[0] == "books":
+                    ttl = _BOOK_IDLE_TTL
+                else:
+                    continue
+                if now - self._last_seen.get(key, now) < ttl:
+                    continue
+                task.cancel()
+                self._tasks.pop(key, None)
+                self._last_seen.pop(key, None)
+                self.reaped += 1
+                if key[0] == "candles":
+                    self.book.drop(key[1], key[2])
+                    self._last_reseed.pop((key[1], key[2]), None)
+                else:
+                    self.books.pop(key[1], None)
+                logger.info(
+                    "reaped idle watcher %s", "/".join(str(part) for part in key)
+                )
+
     def status(self) -> dict[str, Any]:
         return {
             "started": self._started,
@@ -251,11 +321,15 @@ class FeedManager:
                 for key, task in self._tasks.items()
             },
             "tickers_cached": len(self.tickers),
+            "reaped": self.reaped,
             "last_error": self.last_error,
         }
 
     async def close(self) -> None:
         self._stopped = True
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            self._reaper_task = None
         for task in self._tasks.values():
             task.cancel()
         if self._tasks:

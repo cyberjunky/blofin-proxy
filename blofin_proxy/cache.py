@@ -163,6 +163,10 @@ class CandleBook:
             for ts in sorted(book)[: len(book) - self._max_len]:
                 del book[ts]
 
+    def drop(self, inst_id: str, bar: str) -> None:
+        """Forget a key entirely, freeing its candles when its watcher is reaped."""
+        self._books.pop((inst_id, bar), None)
+
     def has(self, inst_id: str, bar: str) -> bool:
         return bool(self._books.get((inst_id, bar)))
 

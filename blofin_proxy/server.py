@@ -102,6 +102,11 @@ async def _cached_get(request: web.Request, ttl: float) -> web.Response:
 
 async def candles(request: web.Request) -> web.Response:
     """WS-fed candles; on a cold key, seed from REST and start the watcher."""
+    # Historical pages must never read or seed the live candle book. Preserve
+    # both cursors and the upstream limit (up to 1440, versus 300 live rows).
+    if "after" in request.query or "before" in request.query:
+        return await _cached_get(request, 60.0)
+
     app = request.app
     book: CandleBook = app["book"]
     cache: TTLCache = app["cache"]
