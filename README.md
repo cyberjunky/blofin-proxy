@@ -110,6 +110,15 @@ catch-all), `feed.py` (ccxt.pro WS watcher manager), `__main__.py` (CLI).
 
 If you like this tool signup at BloFin with my referral: https://blofin.com/register?referral_code=HYXOVL
 
+## Community
+
+Questions, ideas or just want to chat? Join The Junkyard on Discord:
+
+<a href="https://discord.gg/hUBQxRhJCU">
+  <img src="https://raw.githubusercontent.com/cyberjunky/cyberjunky/main/assets/junkyard-discord.svg"
+       alt="Join The Junkyard on Discord" width="600">
+</a>
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
